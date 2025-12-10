@@ -228,6 +228,12 @@
             </div>
             
             <div class="control-group">
+                <label>Mixture Weight (π₁)</label>
+                <input type="range" id="mixtureWeight" min="0.1" max="0.9" step="0.05" value="0.5">
+                <span class="value-display" id="mixtureWeightValue">0.50</span>
+            </div>
+            
+            <div class="control-group">
                 <label>Animation Speed</label>
                 <input type="range" id="speed" min="0.25" max="3" step="0.25" value="1">
                 <span class="value-display" id="speedValue">1.0x</span>
@@ -295,6 +301,7 @@
         
         // Parameters
         let separation = 5;
+        let mixtureWeight = 0.5;  // Weight for first component
         let animationSpeed = 1;
         let isAnimating = false;
         let animationFrame = null;
@@ -314,8 +321,9 @@
             return coefficient * Math.exp(exponent);
         }
         
-        function bimodalGaussian(x, separation) {
-            return 0.5 * gaussian(x, 0, 1) + 0.5 * gaussian(x, separation, 1);
+        function bimodalGaussian(x, separation, weight1) {
+            const weight2 = 1 - weight1;
+            return weight1 * gaussian(x, 0, 1) + weight2 * gaussian(x, separation, 1);
         }
         
         // KL divergence approximations
@@ -333,27 +341,21 @@
         }
         
         // Grid search for optimal parameters
-        function optimizeForwardKL(separation) {
+        function optimizeForwardKL(separation, mixtureWeight) {
             // For forward KL, we minimize KL(p||q) = ∫ p(x) log(p(x)/q(x)) dx
             // This should result in q matching the mean and variance of p
             
             // The bimodal distribution has:
-            // Mean = (0 + separation) / 2 = separation / 2
-            // For variance, we need to compute it properly
+            // Mean = weight1 * 0 + weight2 * separation = (1 - mixtureWeight) * separation
+            const pMean = (1 - mixtureWeight) * separation;
             
-            // When minimizing KL(p||q), the optimal Gaussian q has:
-            // - mean equal to the mean of p
-            // - variance equal to the variance of p
-            
-            const pMean = separation / 2;
-            
-            // Variance of bimodal: E[X^2] - (E[X])^2
-            // Each component has variance 1 and means at 0 and separation
-            // E[X] = separation/2
-            // E[X^2] = 0.5 * (0^2 + 1) + 0.5 * (separation^2 + 1) = 0.5 * (1 + separation^2 + 1) = 1 + separation^2/2
-            // Var[X] = E[X^2] - (E[X])^2 = 1 + separation^2/2 - separation^2/4 = 1 + separation^2/4
-            
-            const pVariance = 1 + (separation * separation) / 4;
+            // Variance calculation for mixture:
+            // Var[X] = E[X^2] - (E[X])^2
+            // E[X] = (1 - mixtureWeight) * separation
+            // E[X^2] = mixtureWeight * 1 + (1 - mixtureWeight) * (separation^2 + 1)
+            const EX2 = mixtureWeight * 1 + (1 - mixtureWeight) * (separation * separation + 1);
+            const EX = pMean;
+            const pVariance = EX2 - EX * EX;
             const pStd = Math.sqrt(pVariance);
             
             // For verification, also compute the KL
@@ -362,14 +364,14 @@
                 xs.push(x);
             }
             
-            const p = x => bimodalGaussian(x, separation);
+            const p = x => bimodalGaussian(x, separation, mixtureWeight);
             const q = x => gaussian(x, pMean, pStd);
             const kl = computeKL(p, q, xs);
             
             return { mean: pMean, std: pStd, kl: kl };
         }
         
-        function optimizeReverseKL(separation) {
+        function optimizeReverseKL(separation, mixtureWeight) {
             const xs = [];
             for (let x = -8; x <= separation + 8; x += 0.05) {
                 xs.push(x);
@@ -382,7 +384,7 @@
             // For reverse KL, search more broadly as it might pick either mode
             for (let mean = -1; mean <= separation + 1; mean += 0.1) {
                 for (let std = 0.3; std <= 2; std += 0.1) {
-                    const p = x => bimodalGaussian(x, separation);
+                    const p = x => bimodalGaussian(x, separation, mixtureWeight);
                     const q = x => gaussian(x, mean, std);
                     const kl = computeKL(q, p, xs);
                     
@@ -397,10 +399,10 @@
             // When modes are well-separated, reverse KL should pick one mode
             // Check both modes explicitly
             if (separation > 3) {
-                // Check left mode
+                // Check left mode (at 0) - weighted by mixtureWeight
                 for (let std = 0.5; std <= 1.5; std += 0.1) {
                     const q = x => gaussian(x, 0, std);
-                    const p = x => bimodalGaussian(x, separation);
+                    const p = x => bimodalGaussian(x, separation, mixtureWeight);
                     const kl = computeKL(q, p, xs);
                     
                     if (kl < minKL) {
@@ -410,10 +412,10 @@
                     }
                 }
                 
-                // Check right mode
+                // Check right mode (at separation) - weighted by (1 - mixtureWeight)
                 for (let std = 0.5; std <= 1.5; std += 0.1) {
                     const q = x => gaussian(x, separation, std);
-                    const p = x => bimodalGaussian(x, separation);
+                    const p = x => bimodalGaussian(x, separation, mixtureWeight);
                     const kl = computeKL(q, p, xs);
                     
                     if (kl < minKL) {
@@ -494,8 +496,8 @@
             
             drawAxes();
             
-            // Draw target distribution
-            drawDistribution(x => bimodalGaussian(x, separation), '#00d4ff', 'solid');
+            // Draw target distribution with mixture weights
+            drawDistribution(x => bimodalGaussian(x, separation, mixtureWeight), '#00d4ff', 'solid');
             
             // Draw approximations based on mode
             if (displayMode === 'both' || displayMode === 'forward') {
@@ -512,7 +514,7 @@
                 xs.push(x);
             }
             
-            const p = x => bimodalGaussian(x, separation);
+            const p = x => bimodalGaussian(x, separation, mixtureWeight);
             const qForward = x => gaussian(x, forwardQ.mean, forwardQ.std);
             const qReverse = x => gaussian(x, reverseQ.mean, reverseQ.std);
             
@@ -566,9 +568,9 @@
             forwardQ = { mean: separation / 2, std: 1 };
             reverseQ = { mean: separation / 2, std: 1 };
             
-            // Calculate target positions
-            const forwardOptimal = optimizeForwardKL(separation);
-            const reverseOptimal = optimizeReverseKL(separation);
+            // Calculate target positions with mixture weight
+            const forwardOptimal = optimizeForwardKL(separation, mixtureWeight);
+            const reverseOptimal = optimizeReverseKL(separation, mixtureWeight);
             
             targetForwardQ = forwardOptimal;
             targetReverseQ = reverseOptimal;
@@ -590,9 +592,27 @@
             separation = parseFloat(e.target.value);
             document.getElementById('separationValue').textContent = separation.toFixed(1);
             
-            // Recalculate optimal positions
-            const forwardOptimal = optimizeForwardKL(separation);
-            const reverseOptimal = optimizeReverseKL(separation);
+            // Recalculate optimal positions with mixture weight
+            const forwardOptimal = optimizeForwardKL(separation, mixtureWeight);
+            const reverseOptimal = optimizeReverseKL(separation, mixtureWeight);
+            
+            if (!isAnimating) {
+                forwardQ = forwardOptimal;
+                reverseQ = reverseOptimal;
+                targetForwardQ = forwardOptimal;
+                targetReverseQ = reverseOptimal;
+            }
+            
+            draw();
+        });
+        
+        document.getElementById('mixtureWeight').addEventListener('input', (e) => {
+            mixtureWeight = parseFloat(e.target.value);
+            document.getElementById('mixtureWeightValue').textContent = mixtureWeight.toFixed(2);
+            
+            // Recalculate optimal positions with new mixture weight
+            const forwardOptimal = optimizeForwardKL(separation, mixtureWeight);
+            const reverseOptimal = optimizeReverseKL(separation, mixtureWeight);
             
             if (!isAnimating) {
                 forwardQ = forwardOptimal;
@@ -628,8 +648,8 @@
         });
         
         // Initial setup
-        const forwardOptimal = optimizeForwardKL(separation);
-        const reverseOptimal = optimizeReverseKL(separation);
+        const forwardOptimal = optimizeForwardKL(separation, mixtureWeight);
+        const reverseOptimal = optimizeReverseKL(separation, mixtureWeight);
         forwardQ = forwardOptimal;
         reverseQ = reverseOptimal;
         targetForwardQ = forwardOptimal;
